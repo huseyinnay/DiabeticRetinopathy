@@ -8,3 +8,8 @@ Pillow
 fastapi
 uvicorn
 python-dotenv
+pydantic-settings
+loguru
+python-multipart
+pytest
+httpx
