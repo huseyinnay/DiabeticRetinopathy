@@ -13,3 +13,5 @@ loguru
 python-multipart
 pytest
 httpx
+onnxruntime
+gunicorn
