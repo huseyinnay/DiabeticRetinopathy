@@ -1,0 +1,9 @@
+.venv
+__pycache__
+.git
+.pytest_cache
+data
+runs/*.pt
+tests/
+test_asgi_app.py
+*.ipynb
