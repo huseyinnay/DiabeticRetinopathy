@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Diabetic Retinopathy Analyzer</title>
+    <meta name="description" content="AI-powered tool for Diabetic Retinopathy screening from fundus images.">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="blob-bg"></div>
+    <div class="blob-bg blob-2"></div>
+    
+    <div class="container glass-panel">
+        <header>
+            <h1>Diabetic Retinopathy <span>Analyzer</span></h1>
+            <p>Upload a fundus image for instant AI-based screening</p>
+        </header>
+        
+        <main>
+            <div class="upload-zone" id="uploadZone">
+                <input type="file" id="fileInput" accept="image/jpeg, image/png, image/webp" hidden>
+                <div class="upload-content">
+                    <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="17 8 12 3 7 8"></polyline>
+                        <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    <h3>Drag & Drop your image here</h3>
+                    <p>or click to browse (JPEG, PNG, WEBP)</p>
+                </div>
+            </div>
+
+            <div class="preview-section hidden" id="previewSection">
+                <div class="image-wrapper">
+                    <img id="imagePreview" src="" alt="Fundus Preview">
+                </div>
+                <div class="button-group">
+                    <button class="btn btn-primary" id="analyzeBtn">Analyze Image</button>
+                    <button class="btn btn-secondary" id="resetBtn">Choose Another</button>
+                </div>
+            </div>
+
+            <div class="loader hidden" id="loader">
+                <div class="spinner"></div>
+                <p>Analyzing retinal features...</p>
+            </div>
+
+            <div class="result-section hidden" id="resultSection">
+                <div class="result-card" id="resultCard">
+                    <h2 id="resultTitle">Result</h2>
+                    <div class="prob-bar-container">
+                        <div class="prob-bar" id="probBar"></div>
+                    </div>
+                    <p class="prob-text">Probability: <span id="probValue">0.00</span>%</p>
+                    <p class="threshold-text">Threshold: <span id="thresholdValue">0.5</span></p>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
