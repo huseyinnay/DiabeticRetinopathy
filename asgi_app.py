@@ -7,28 +7,29 @@ FastAPI tabanlı ASGI uygulaması:
 - /metadata: Model ve ayar bilgileri
 
 Notlar:
-- Ağırlıklar (.pt) ve summary.json yolu .env dosyasından okunur.
+- Ağırlıklar (.onnx) ve summary.json yolu .env dosyasından okunur.
 - Eğitimde kullanılan ön-işleme ayarları (.env veya summary.json) ile eşleşmelidir.
 """
 
 import io
 import json
+import math
 from pathlib import Path
 from typing import Optional, List
 
-import torch
-import timm
+import numpy as np
+import onnxruntime as ort
 from PIL import Image
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from torchvision import transforms
+from fastapi.staticfiles import StaticFiles
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 from loguru import logger
 
 # Ayarlar (Pydantic Settings)
 class Settings(BaseSettings):
-    dr_weights: Path = Field(default=Path("runs/binary_efficientnet_b0/best.pt"))
+    dr_weights: Path = Field(default=Path("runs/binary_efficientnet_b0/best.onnx"))
     dr_summary: Path = Field(default=Path("runs/binary_efficientnet_b0/summary.json"))
     dr_image_size: int = Field(default=512)
     dr_mean: List[float] = Field(default=[0.485, 0.456, 0.406])
@@ -57,51 +58,47 @@ def _read_threshold() -> float:
 
 THRESHOLD = _read_threshold()
 
-# Görüntü ön-işleme pipeline 
-TFM = transforms.Compose([
-    transforms.Resize((settings.dr_image_size, settings.dr_image_size)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=settings.dr_mean, std=settings.dr_std),
-])
+def sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
 
-# Model 
+def preprocess_image(img_rgb: Image.Image) -> np.ndarray:
+    """NumPy kullanarak görsel ön işleme."""
+    # PyTorch transforms.Resize varsayılan olarak BILINEAR kullanır.
+    img = img_rgb.resize((settings.dr_image_size, settings.dr_image_size), Image.Resampling.BILINEAR)
+    img_np = np.array(img, dtype=np.float32) / 255.0
+    
+    mean = np.array(settings.dr_mean, dtype=np.float32)
+    std = np.array(settings.dr_std, dtype=np.float32)
+    
+    img_np = (img_np - mean) / std
+    img_np = img_np.transpose(2, 0, 1)  # HWC to CHW
+    img_np = np.expand_dims(img_np, axis=0)  # Add batch dimension
+    return img_np
 
-class DRModel:
-    """PyTorch timm modeli ile DR binary sınıflandırma."""
+class DRModelONNX:
+    """ONNX Runtime ile DR binary sınıflandırma."""
 
-    def __init__(self, weights_path: Path, model_name: str):
+    def __init__(self, weights_path: Path):
         if not weights_path.exists():
             logger.error(f"Ağırlık dosyası bulunamadı: {weights_path.resolve()}")
             raise FileNotFoundError(f"Ağırlık dosyası bulunamadı: {weights_path.resolve()}")
         
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Model {model_name} yükleniyor. Cihaz: {self.device}")
-
-        # Modeli oluştur
-        self.model = timm.create_model(model_name, pretrained=False, num_classes=1)
-
-        # Ağırlıkları yükle 
-        try:
-            state = torch.load(str(weights_path), map_location=self.device, weights_only=True)
-        except TypeError:  # eski PyTorch sürümleri için fallback
-            state = torch.load(str(weights_path), map_location=self.device)
-
-        # Eğer checkpoint 'state_dict' içeriyorsa onu al
-        if isinstance(state, dict) and "state_dict" in state:
-            state = {k.replace("model.", ""): v for k, v in state["state_dict"].items()}
-
-        self.model.load_state_dict(state, strict=False)
-        self.model.to(self.device)
-        self.model.eval()
+        logger.info(f"ONNX Model yükleniyor: {weights_path}")
+        
+        # ONNX oturumu oluştur
+        self.session = ort.InferenceSession(str(weights_path), providers=["CPUExecutionProvider"])
+        self.input_name = self.session.get_inputs()[0].name
+        self.output_name = self.session.get_outputs()[0].name
+        
         logger.info(f"Model başarıyla yüklendi. Eşik değeri (Threshold): {THRESHOLD}")
 
-    @torch.inference_mode()
     def predict_proba(self, img_rgb: Image.Image) -> float:
         """Görselden DR+ olasılığını (sigmoid) döndür."""
-        x = TFM(img_rgb).unsqueeze(0).to(self.device)
-        logit = self.model(x).squeeze(0).float()
-        prob = torch.sigmoid(logit).item()
-        return float(prob)
+        x = preprocess_image(img_rgb)
+        logits = self.session.run([self.output_name], {self.input_name: x})[0]
+        logit = float(logits[0][0])
+        prob = sigmoid(logit)
+        return prob
 
     def classify(self, img_rgb: Image.Image) -> dict:
         """Olasılığı eşiğe göre ikili sınıfa dönüştür."""
@@ -110,11 +107,11 @@ class DRModel:
         return {"prob": p, "label": label, "threshold": THRESHOLD}
 
 # Singleton/önbellek
-_model: Optional[DRModel] = None
-def get_model() -> DRModel:
+_model: Optional[DRModelONNX] = None
+def get_model() -> DRModelONNX:
     global _model
     if _model is None:
-        _model = DRModel(settings.dr_weights, settings.dr_model_name)
+        _model = DRModelONNX(settings.dr_weights)
     return _model
 
 
@@ -123,7 +120,7 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Uygulama başlarken modeli RAM'e yükle."""
-    logger.info("FastAPI uygulaması başlıyor, model belleğe yükleniyor...")
+    logger.info("FastAPI uygulaması başlıyor, ONNX modeli belleğe yükleniyor...")
     get_model()
     yield
 
@@ -132,7 +129,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="DR Binary Classifier API",
     version="1.0.0",
-    description="Fundus fotoğraflarından DR (binary) tahmini",
+    description="Fundus fotoğraflarından DR (binary) tahmini (ONNX Backend)",
     lifespan=lifespan
 )
 
@@ -159,9 +156,8 @@ def metadata():
         "image_size": settings.dr_image_size,
         "normalize": {"mean": settings.dr_mean, "std": settings.dr_std},
         "threshold": THRESHOLD,
-        "device": str(torch.device("cuda" if torch.cuda.is_available() else "cpu")),
+        "device": "cpu (onnxruntime)",
     }
-
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
@@ -169,7 +165,6 @@ ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
     """Fundus görselinden DR tahmini yap."""
-    # Girdi Doğrulama: MIME type kontrolü
     if file.content_type not in ALLOWED_MIME_TYPES:
         logger.warning(f"Geçersiz dosya tipi gönderildi: {file.content_type}")
         raise HTTPException(
@@ -177,7 +172,6 @@ async def predict(file: UploadFile = File(...)):
             detail=f"Geçersiz dosya tipi: {file.content_type}. Desteklenen tipler: {ALLOWED_MIME_TYPES}"
         )
         
-    # Girdi Doğrulama: Dosya boyutu kontrolü
     raw = await file.read()
     if len(raw) > MAX_FILE_SIZE:
         logger.warning(f"Dosya çok büyük: {len(raw)} bytes")
@@ -200,3 +194,9 @@ async def predict(file: UploadFile = File(...)):
     except Exception as e:
         logger.exception("Çıkarım (inference) sırasında hata oluştu")
         raise HTTPException(status_code=500, detail="İç sunucu hatası (Inference error).")
+
+# Frontend için static dosyaları sunma
+import os
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
