@@ -12,3 +12,8 @@ env/
 .ipynb_checkpoints/
 
 data/
+
+
+*.onnx
+*.onnx.data
+runs/
